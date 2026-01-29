@@ -1,5 +1,7 @@
 
+
 # import packages
+import duckdb
 from OpenExcel import OpenExcel
 from WebRetrieve import WebRetrieve
 
@@ -50,37 +52,63 @@ def remove(df_ : pd.DataFrame) -> None:
 
     return df_
 
+def pandas_to_sql(dtype):
+    
+    if dtype.kind in {"i"}:      # integer
+        return "INTEGER"
+    
+    if dtype.kind in {"f"}:      # float
+        return "DOUBLE PRECISION"
+    
+    if dtype.kind in {"b"}:      # boolean
+        return "BOOLEAN"
+    
+    if dtype.kind in {"M"}:      # datetime64
+        return "TIMESTAMP"
+    
+    if dtype.name == "category":
+        return "VARCHAR"
+    
+    return "VARCHAR"             # fallback for object/string
+
+def generate_create_table_sql(df_ : pd.DataFrame, table_name):
+    
+    
+    cols = []
+    for col, dtype in df_.dtypes.items():
+        sql_type = pandas_to_sql(dtype)
+        cols.append(f'"{col}" {sql_type}')
+    
+    cols_sql = ",\n  ".join(cols)
+
+    # upload to duckdb
+    db_path = r"C:\Users\jackm\OneDrive\Documents\duckdb_cli-windows-amd64\my_database.duckdb"
+    con = duckdb.connect(db_path)
+
+    con.execute(f"""
+    CREATE TABLE IF NOT EXISTS {table_name} ({cols_sql});
+    """)
+
 def upload_pgres(df_ : pd.DataFrame, pgres_name : str) -> None:
 
     start = time.time()
 
-    # Connect to db
-    conn = psycopg2.connect(
-        dbname='archives',
-        user = username,
-        password = password,
-        host = 'ccjda1.icjia.org',
-        port="5432" )
-    cursor = conn.cursor()
+    # upload to duckdb
+    db_path = r"C:\Users\jackm\OneDrive\Documents\duckdb_cli-windows-amd64\my_database.duckdb"
+    con = duckdb.connect(db_path)
 
-    print(f'---- Upload {pgres_name} to PostGres')
+    #### FUNCTION
 
-    # Truncate the table to remove existing data
-    query = 'TRUNCATE TABLE ' + pgres_name
-    cursor.execute(query)
+    con.execute(f'TRUNCATE TABLE {pgres_name}')
+    con.register('df_view', df_)
 
-    # iterate and upload each row
-    for index, row in df_.iterrows():
-        columns = ', '.join(row.index)
-        values = ', '.join(['%s'] * len(row))
-        insert_query = f'INSERT INTO {pgres_name} ({columns}) VALUES ({values})'
-        
-        cursor.execute(insert_query, tuple(row))
+    # 3. Insert fresh data
+    con.execute(f"""
+        INSERT INTO {pgres_name}
+        SELECT * FROM df_view;
+    """)
 
-    # Commit the transaction
-    conn.commit()
-    cursor.close()
-    conn.close()
+    con.close()
 
     end = time.time()
     print(f'---- Complete {pgres_name} to PostGres: {end - start} seconds')
@@ -124,26 +152,13 @@ if __name__ == '__main__':
         try: df_.drop(columns=['year'], inplace = True) # drop quarter cols
         except: pass
 
-    # retrieve credentials
-    username = os.getenv('POSTGRES_USER')
-    password = os.getenv('POSTGRES_PASSWORD')
+    df_pop = df_pop.convert_dtypes()
+    generate_create_table_sql(df_pop, 'idoc_public_population')
+    df_adm = df_adm.convert_dtypes()
+    generate_create_table_sql(df_adm, 'idoc_public_admissions')
+    df_ext = df_ext.convert_dtypes()
+    generate_create_table_sql(df_ext, 'idoc_public_exits')
 
-    # if not defined default to the user
-    if username == None:
-
-        print('USER INPUT COMMANDS...')
-        os.environ['POSTGRES_USER'] = input('ccjda username:')  
-        os.environ['POSTGRES_PASSWORD'] = input('password:')
-
-            # reset credentials
-        username = os.getenv('POSTGRES_USER')
-        password = os.getenv('POSTGRES_PASSWORD')
-
-    params = [
-        (df_adm, 'justice_counts.idoc_public_admissions'),
-        (df_pop, 'justice_counts.idoc_public_pop'),
-        (df_ext, 'justice_counts.idoc_public_exits')
-    ]
-
-    with mp.Pool(processes=len(params)) as pool:
-        results = pool.starmap(upload_pgres, params)
+    upload_pgres(df_pop, 'idoc_public_population')
+    upload_pgres(df_adm, 'idoc_public_admissions')
+    upload_pgres(df_ext, 'idoc_public_exits')

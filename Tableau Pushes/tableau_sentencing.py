@@ -1,104 +1,101 @@
 
-'''
-Version:      Python 3.12.3
-
-Author:       Jack Monaghan
-Raw Source  : IDOC population datasets (https://idoc.illinois.gov/reportsandstatistics/populationdatasets.html) 
-
-write to    : /encrypted/data/Justice_Counts/Prisons/JC Upload/admissions.csv
-            : /encrypted/data/Justice_Counts/Prisons/JC Upload/releases.csv
-            : /encrypted/data/Justice_Counts/Prisons/JC Upload/population.csv
-
-            
-'''
 
 import pandas as pd
-import psycopg2
-import os
+import duckdb
 import itertools
 
 def extract_pgres(query : str) -> pd.DataFrame:
 
     query = 'SELECT * FROM ' + query 
-    cursor.execute(query)
+    conn.execute(query)
 
-    col = [desc[0] for desc in cursor.description]
-    data = cursor.fetchall()
+    col = [desc[0] for desc in conn.description]
+    data = conn.fetchall()
 
     df_ = pd.DataFrame(data = data, columns = col)
 
     return df_
 
+def pandas_to_sql(dtype):
+    
+    if dtype.kind in {"i"}:      # integer
+        return "INTEGER"
+    
+    if dtype.kind in {"f"}:      # float
+        return "DOUBLE PRECISION"
+    
+    if dtype.kind in {"b"}:      # boolean
+        return "BOOLEAN"
+    
+    if dtype.kind in {"M"}:      # datetime64
+        return "TIMESTAMP"
+    
+    if dtype.name == "category":
+        return "VARCHAR"
+    
+    return "VARCHAR"             # fallback for object/string
+
+def generate_create_table_sql(df_ : pd.DataFrame, table_name):
+    
+    
+    cols = []
+    for col, dtype in df_.dtypes.items():
+        sql_type = pandas_to_sql(dtype)
+        cols.append(f'"{col}" {sql_type}')
+    
+    cols_sql = ",\n  ".join(cols)
+
+    # upload to duckdb
+    db_path = r"C:\Users\jackm\OneDrive\Documents\duckdb_cli-windows-amd64\my_database.duckdb"
+    con = duckdb.connect(db_path)
+
+    con.execute(f"""
+    CREATE TABLE IF NOT EXISTS {table_name} ({cols_sql});
+    """)
+
+def upload_pgres(df_ : pd.DataFrame, pgres_name : str) -> None:
+
+    # upload to duckdb
+    db_path = r"C:\Users\jackm\OneDrive\Documents\duckdb_cli-windows-amd64\my_database.duckdb"
+    con = duckdb.connect(db_path)
+
+    #### FUNCTION
+
+    con.execute(f'TRUNCATE TABLE {pgres_name}')
+    con.register('df_view', df_)
+
+    # 3. Insert fresh data
+    con.execute(f"""
+        INSERT INTO {pgres_name}
+        SELECT * FROM df_view;
+    """)
+
+    con.close()
+
 if __name__ == '__main__':
 
-    # retrieve credentials
-    username = os.getenv('POSTGRES_USER')
-    password = os.getenv('POSTGRES_PASSWORD')
-    
-    # if not defined default to the user
-    if username == None:
-        os.environ['POSTGRES_USER'] = input('ccjda username:')  
-        os.environ['POSTGRES_PASSWORD'] = input('password:')
+    # upload to duckdb
+    db_path = r"C:\Users\jackm\OneDrive\Documents\duckdb_cli-windows-amd64\my_database.duckdb"
+    conn = duckdb.connect(db_path)
 
-            # reset credentials
-        username = os.getenv('POSTGRES_USER')
-        password = os.getenv('POSTGRES_PASSWORD')
-
-    # Connect to db
-    conn = psycopg2.connect(
-        dbname='archives',
-        user = username,
-        password = password,
-        host = 'ccjda1.icjia.org',
-        port="5432" )
-    cursor = conn.cursor()
-
-    df_admits   = extract_pgres('justice_counts.idoc_public_admissions')
-    df_pop      = extract_pgres('justice_counts.idoc_public_pop')
-    df_exits    = extract_pgres('justice_counts.idoc_public_exits')
-    df_cen_pop  = extract_pgres('justice_counts.geoid_population')
+    df_admits   = extract_pgres('idoc_public_admissions')
+    df_pop      = extract_pgres('idoc_public_population')
+    df_exits    = extract_pgres('idoc_public_exits')
+    df_cen_pop  = extract_pgres('cesnsus_illinois_county_population')
 
     # don't know what's going on with the entires that say state
     # but their values are clearly Illinois' ucgid code 
     where = df_cen_pop['variable'] == 'state'
     df_cen_pop = df_cen_pop.loc[~where]
 
-    # Close the connection
-    cursor.close()
     conn.close()
-
-    # -------------------------------------------------
-    # Upload Karl's Key
-    # -------------------------------------------------
-
-    file_path = '/encrypted/data/Justice_Counts/Miscellaneous Tasks/Mapping csv/'
-    file_name = 'idoc_public_map.xlsx'
-  
-    col = ['state_description', 'Justice_Counts']
-    key_df = pd.read_excel(file_path + file_name, usecols = col)
-  
-    where  = key_df['state_description'].duplicated()
-    key_df = key_df[~where]
-
-    col = 'Justice_Counts'
-    key_df[col] = key_df[col] + ' Offense'
-
-    # Merges Karl's key
-    df_pop = df_pop.merge(
-        key_df, how = 'left', left_on = 'hofnscd', 
-        right_on = 'state_description')
-    
-    where = df_pop['Justice_Counts'] == 'Unknown Offense'
-    df_pop.loc[where, 'Justice_Counts'] = 'Missing Offense Record'
 
     # -------------------------------------------------
     # Create scaffolding table to ensure all combinations
     # -------------------------------------------------
 
     ucgid       = df_cen_pop['ucgid'].unique()
-    breakdowns  = pd.concat([
-        pd.Series(df_cen_pop['variable'].unique()),
-        pd.Series(key_df['Justice_Counts'].unique())])
+    breakdowns  = pd.Series(df_cen_pop['variable'].unique())
     quarters    = pd.to_datetime(df_pop['record_date'], errors='coerce').unique()
 
     scaffolding = pd.DataFrame(
@@ -127,23 +124,6 @@ if __name__ == '__main__':
     scaffolding.drop(columns = 'county_name_x', inplace = True)
     scaffolding.rename(columns = {'county_name_y' : 'county_name'}, inplace = True)
 
-    # -------------------------------------------------
-    # Urban
-    # -------------------------------------------------
-
-    df_urban = pd.read_excel(
-        "/encrypted/data/Justice_Counts/Miscellaneous Tasks/2020_UA_COUNTY.xlsx",
-        usecols = ['STATE_NAME', 'COUNTY', 'POPPCT_URB'])
-    
-    # select only Illinois
-    where = df_urban['STATE_NAME'] == 'Illinois'
-    df_urban = df_urban.loc[where]
-    where = df_urban['POPPCT_URB'] > 0.7
-    
-    # Define urban counties
-    where = df_urban['POPPCT_URB'] > 0.7
-    urban_counties = df_urban.loc[where, 'COUNTY']
-    scaffolding['urban'] = scaffolding['ucgid'].str.replace('17', '').astype(int).isin(urban_counties)
 
     # -------------------------------------------------
     # Format dt for merge & aggregations
@@ -203,12 +183,12 @@ if __name__ == '__main__':
     result = result.loc[~where]
 
     # group offense type
-    by_hoff = ['key', 'quarter', 'Justice_Counts']
+    by_hoff = ['key', 'quarter', 'hofnscd']
     result_ = df_pop.groupby(by = by_hoff)['docnbr'].count()
     result_ = result_.reset_index()
-    rename = {'docnbr' : 'prison_pop', 'Justice_Counts' : 'breakdown'}
+    rename = {'docnbr' : 'prison_pop', 'hofnscd' : 'breakdown'}
     result_.rename(columns = rename, inplace = True)
-    result_['breakdown_category'] = 'Offense Type'
+    result_['breakdown_category'] = 'Offense'
 
     result = pd.concat([result, result_])
 
@@ -308,36 +288,10 @@ if __name__ == '__main__':
     result.loc[where, 'breakdown_category'] = 'Offense Type'
     
     # -------------------------------------------------
-    # Upload to Tableau
+    # Upload to sql
     # -------------------------------------------------
 
-    # Connect to db
-    conn = psycopg2.connect(
-        dbname='archives',
-        user = username,
-        password = password,
-        host = 'ccjda1.icjia.org',
-        port="5432" )
-    cursor = conn.cursor()
-
-    pgres_name = 'tableau.idoc_population_stnccty'
-    print(f'---- Upload {pgres_name} to PostGres')
-
-    # Truncate the table to remove existing data
-    query = 'TRUNCATE TABLE ' + pgres_name
-    cursor.execute(query)
-
-    # iterate and upload each row
-    for index, row in result.iterrows():
-        columns = ', '.join(row.index)
-        values = ', '.join(['%s'] * len(row))
-        insert_query = f'INSERT INTO {pgres_name} ({columns}) VALUES ({values})'
-        
-        cursor.execute(insert_query, tuple(row))
-
-    # Commit the transaction
-    conn.commit()
-
-    # Close the connection
-    cursor.close()
-    conn.close()
+    result = result.convert_dtypes()
+    generate_create_table_sql(result, 'tableau_idoc_sentencing')
+    
+    upload_pgres(result, 'tableau_idoc_sentencing')
