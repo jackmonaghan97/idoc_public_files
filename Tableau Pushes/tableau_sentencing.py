@@ -1,4 +1,5 @@
 
+#%%
 
 import pandas as pd
 import duckdb
@@ -74,13 +75,16 @@ def upload_pgres(df_ : pd.DataFrame, pgres_name : str) -> None:
 
 if __name__ == '__main__':
 
-    # upload to duckdb
+    # ------------------------------------------------
+    # Extract from DuckDB
+    # ------------------------------------------------
+
+    # connect
     db_path = r"C:\Users\jackm\OneDrive\Documents\duckdb_cli-windows-amd64\my_database.duckdb"
     conn = duckdb.connect(db_path)
 
-    df_admits   = extract_pgres('idoc_public_admissions')
+    # save
     df_pop      = extract_pgres('idoc_public_population')
-    df_exits    = extract_pgres('idoc_public_exits')
     df_cen_pop  = extract_pgres('cesnsus_illinois_county_population')
 
     # don't know what's going on with the entires that say state
@@ -94,6 +98,18 @@ if __name__ == '__main__':
     # Create scaffolding table to ensure all combinations
     # -------------------------------------------------
 
+    
+    age = (df_pop['record_date'] - df_pop['birthdt'])
+    age = (age.dt.days/360).fillna(0).astype(int)
+    age = age // 10 * 10
+    df_pop
+
+#%%
+
+    # -------------------------------------------------
+    # Create scaffolding table to ensure all combinations
+    # -------------------------------------------------
+#%%
     ucgid       = df_cen_pop['ucgid'].unique()
     breakdowns  = pd.Series(df_cen_pop['variable'].unique())
     quarters    = pd.to_datetime(df_pop['record_date'], errors='coerce').unique()

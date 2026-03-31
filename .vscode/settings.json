@@ -1,0 +1,11 @@
+{
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "DuckDB",
+            "name": "Connect to DuckDB",
+            "database": "\"C:\\Users\\jackm\\OneDrive\\Documents\\duckdb_cli-windows-amd64\\my_database.duckdb\""
+        }
+    ],
+    "sqltools.useNodeRuntime": true
+}
